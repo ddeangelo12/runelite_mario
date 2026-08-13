@@ -25,6 +25,10 @@ dependencies {
 	testImplementation 'junit:junit:4.12'
 	testImplementation group: 'net.runelite', name:'client', version: runeLiteVersion
 	testImplementation group: 'net.runelite', name:'jshell', version: runeLiteVersion
+	implementation 'net.java.dev.jna:jna:5.14.0'
+	testImplementation 'net.java.dev.jna:jna:5.14.0'
+
+
 }
 
 group = 'com.example'
@@ -38,7 +42,7 @@ tasks.register('run', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = pluginMainClass
 
-	jvmArgs "-ea"
+	jvmArgs "-ea", "-Djna.library.path=${projectDir}/native"
 	args "--developer-mode", "--debug"
 }
 
