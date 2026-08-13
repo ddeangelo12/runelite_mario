@@ -153,6 +153,38 @@ public interface MarioConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "debugCollision",
+            name = "Show collision mesh",
+            description = "Wireframe overlay of the surfaces actually uploaded to "
+                    + "libsm64. Floors teal, walls amber.",
+            position = 20
+    )
+    default boolean debugCollision() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "debugCollisionRadius",
+            name = "Collision mesh radius",
+            description = "Tiles around your character to draw. Projecting the whole "
+                    + "buffer every frame in Java2D is not viable.",
+            position = 21
+    )
+    default int debugCollisionRadius() {
+        return 8;
+    }
+
+    @ConfigItem(
+            keyName = "debugCollisionStats",
+            name = "Show collision stats",
+            description = "Surface counts and the current SM64 origin.",
+            position = 22
+    )
+    default boolean debugCollisionStats() {
+        return true;
+    }
+
+    @ConfigItem(
             keyName = "preventSleep",
             name = "Prevent sleeping",
             description = "SM64 puts Mario to sleep after ~20s idle, and waking him "

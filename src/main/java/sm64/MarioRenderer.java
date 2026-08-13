@@ -41,6 +41,7 @@ public class MarioRenderer extends Overlay {
     private final Client client;
     private final MarioPlugin plugin;
     private final MarioConfig config;
+    private final Projector projector;
 
     // All reused every frame -- this runs at frame rate, so no per-frame allocation.
     private final float[] positions = new float[MAX_TRIS * STRIDE];
@@ -61,14 +62,13 @@ public class MarioRenderer extends Overlay {
     private final int[] projected = new int[2];
     private final Polygon poly = new Polygon(new int[3], new int[3], 3);
 
-    /** Camera-space depth of the most recent project() call. */
-    private float lastDepth;
-
     @Inject
-    private MarioRenderer(Client client, MarioPlugin plugin, MarioConfig config) {
+    private MarioRenderer(Client client, MarioPlugin plugin, MarioConfig config,
+                          Projector projector) {
         this.client = client;
         this.plugin = plugin;
         this.config = config;
+        this.projector = projector;
         setPosition(OverlayPosition.DYNAMIC);
         setLayer(OverlayLayer.ABOVE_SCENE);
     }
@@ -117,13 +117,13 @@ public class MarioRenderer extends Overlay {
                 float localY = originY - sz * scale;
                 float height = -sy * scale;
 
-                if (!project(localX, localY, height, projected)) {
+                if (!projector.project(localX, localY, height, projected)) {
                     ok = false;
                     break;
                 }
                 screenX[t * 3 + v] = projected[0];
                 screenY[t * 3 + v] = projected[1];
-                depthSum += lastDepth;
+                depthSum += projector.lastDepth();
             }
 
             if (ok) {
@@ -203,7 +203,7 @@ public class MarioRenderer extends Overlay {
 
         int h = Perspective.getTileHeight(client, lp, client.getPlane());
 
-        if (project(lp.getX(), lp.getY(), h, projected)) {
+        if (projector.project(lp.getX(), lp.getY(), h, projected)) {
             g.setColor(Color.GREEN);
             g.drawLine(projected[0] - 12, projected[1], projected[0] + 12, projected[1]);
             g.drawLine(projected[0], projected[1] - 12, projected[0], projected[1] + 12);
@@ -216,85 +216,4 @@ public class MarioRenderer extends Overlay {
         }
     }
 
-    /**
-     * Projects an OSRS local-space point to canvas coordinates, stashing the
-     * camera-space depth in lastDepth.
-     *
-     * Mirrors RuneLite's Perspective.localToCanvas, which dispatches on
-     * client.isGpu(). We reimplement rather than call it because it returns null
-     * outside the viewport (a triangle straddling the screen edge would vanish)
-     * and it discards the depth value we need for sorting.
-     *
-     * NOTE the trig tables: camera pitch and yaw are 14-bit JAU, so they index
-     * SINE14/COSINE14 (0x4000 entries), NOT SINE/COSINE (2048). Using the small
-     * tables silently produces wrong angles -- or an index out of bounds once
-     * the yaw exceeds 2047.
-     */
-    private boolean project(float localX, float localY, float height, int[] out) {
-        return client.isGpu()
-                ? projectGpu(localX, localY, height, out)
-                : projectCpu(localX, localY, height, out);
-    }
-
-    private boolean projectGpu(float localX, float localY, float height, int[] out) {
-        float cameraPitch = client.getCameraFpPitch();
-        float cameraYaw = client.getCameraFpYaw();
-
-        float pitchSin = (float) Math.sin(cameraPitch);
-        float pitchCos = (float) Math.cos(cameraPitch);
-        float yawSin = (float) Math.sin(cameraYaw);
-        float yawCos = (float) Math.cos(cameraYaw);
-
-        float fx = localX - client.getCameraFpX();
-        float fy = localY - client.getCameraFpY();
-        float fz = height - client.getCameraFpZ();
-
-        float x1 = fx * yawCos + fy * yawSin;
-        float y1 = fy * yawCos - fx * yawSin;
-        float y2 = fz * pitchCos - y1 * pitchSin;
-        float z1 = y1 * pitchCos + fz * pitchSin;
-
-        if (z1 < 50f) {
-            return false;
-        }
-
-        int scale = client.getScale();
-        out[0] = Math.round(client.getViewportWidth() / 2f + x1 * scale / z1)
-                + client.getViewportXOffset();
-        out[1] = Math.round(client.getViewportHeight() / 2f + y2 * scale / z1)
-                + client.getViewportYOffset();
-        lastDepth = z1;
-        return true;
-    }
-
-    private boolean projectCpu(float localX, float localY, float height, int[] out) {
-        int cameraPitch = client.getCameraPitch() & 0x3FFF;
-        int cameraYaw = client.getCameraYaw() & 0x3FFF;
-
-        float pitchSin = Perspective.SINEF14[cameraPitch];
-        float pitchCos = Perspective.COSINEF14[cameraPitch];
-        float yawSin = Perspective.SINEF14[cameraYaw];
-        float yawCos = Perspective.COSINEF14[cameraYaw];
-
-        float x = localX - client.getCameraX();
-        float y = localY - client.getCameraY();
-        float z = height - client.getCameraZ();
-
-        float x1 = x * yawCos + y * yawSin;
-        float y1 = y * yawCos - x * yawSin;
-        float y2 = z * pitchCos - y1 * pitchSin;
-        float z1 = y1 * pitchCos + z * pitchSin;
-
-        if (z1 < 50f) {
-            return false;
-        }
-
-        int scale = client.getScale();
-        out[0] = (int) (client.getViewportWidth() / 2 + x1 * scale / z1)
-                + client.getViewportXOffset();
-        out[1] = (int) (client.getViewportHeight() / 2 + y2 * scale / z1)
-                + client.getViewportYOffset();
-        lastDepth = z1;
-        return true;
-    }
 }

@@ -51,6 +51,7 @@ public class MarioPlugin extends Plugin {
     @Inject private KeyManager keyManager;
     @Inject private MarioInput input;
     @Inject private MarioObjectRenderer objectRenderer;
+    @Inject private MarioCollisionOverlay collisionOverlay;
 
     // Strong references required -- a GC'd JNA callback crashes the JVM.
     private final LibSM64.DebugPrintFunction debugPrint =
@@ -102,6 +103,7 @@ public class MarioPlugin extends Plugin {
         collision.setFlattenTiles(config.flattenTiles());
         collision.setNotSlippery(config.notSlippery());
         overlayManager.add(renderer);
+        overlayManager.add(collisionOverlay);
         keyManager.registerKeyListener(input);
         clientThread.invokeLater(this::tryInit);
     }
@@ -109,6 +111,7 @@ public class MarioPlugin extends Plugin {
     @Override
     protected void shutDown() {
         overlayManager.remove(renderer);
+        overlayManager.remove(collisionOverlay);
         keyManager.unregisterKeyListener(input);
         clientThread.invoke(objectRenderer::shutDown);
         input.clear();
@@ -126,6 +129,15 @@ public class MarioPlugin extends Plugin {
     }
 
     // --- Accessors used by the renderer ------------------------------------
+
+    /**
+     * True once libsm64 is up and collision has been uploaded. The collision
+     * overlay uses this rather than isSimulating() so the mesh stays visible
+     * even when Mario himself is not spawned.
+     */
+    public boolean isInitialised() {
+        return globalInitDone && collision.buffer().count() > 0;
+    }
 
     public boolean isSimulating() {
         return globalInitDone && marioId >= 0 && config.enabled();

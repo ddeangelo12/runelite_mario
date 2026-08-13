@@ -40,6 +40,28 @@ public final class SurfaceBuffer {
         count = 0;
     }
 
+    /**
+     * Reads triangle i back out into out[9] as x1,y1,z1,x2,y2,z2,x3,y3,z3.
+     * Used by the collision debug overlay so it draws what was actually
+     * uploaded, rather than what we believe was uploaded.
+     */
+    public void readTriangle(int i, int[] out) {
+        long o = (long) i * STRIDE;
+        out[0] = mem.getInt(o + 8);
+        out[1] = mem.getInt(o + 12);
+        out[2] = mem.getInt(o + 16);
+        out[3] = mem.getInt(o + 20);
+        out[4] = mem.getInt(o + 24);
+        out[5] = mem.getInt(o + 28);
+        out[6] = mem.getInt(o + 32);
+        out[7] = mem.getInt(o + 36);
+        out[8] = mem.getInt(o + 40);
+    }
+
+    public short typeOf(int i) {
+        return mem.getShort((long) i * STRIDE);
+    }
+
     public int count() {
         return count;
     }
