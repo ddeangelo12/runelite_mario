@@ -62,6 +62,21 @@ public class MarioObjectRenderer {
         this.config = config;
     }
 
+    /**
+     * Drops the RuneLiteObject without discarding the scratch model.
+     *
+     * A scene reload rebases the world view and unregisters any RuneLiteObject
+     * attached to it. Ours keeps calling setActive(true) on an object the client
+     * no longer tracks, which silently does nothing and Mario vanishes. The
+     * scratch model is scene-independent, so it survives.
+     */
+    public void onSceneChanged() {
+        if (object != null) {
+            object.setActive(false);
+            object = null;
+        }
+    }
+
     public void shutDown() {
         if (object != null) {
             object.setActive(false);
@@ -128,6 +143,13 @@ public class MarioObjectRenderer {
         }
         int lx = collision.fromSm64XToLocalX(state[0]);
         int ly = collision.fromSm64ZToLocalY(state[2]);
+
+        // Out-of-scene coordinates would index past the tile height array.
+        int maxLocal = 104 * SceneCollision.LOCAL_TILE_SIZE;
+        if (lx < 0 || ly < 0 || lx >= maxLocal || ly >= maxLocal) {
+            return null;
+        }
+
         // LocalPoint gained a WorldView parameter in recent versions. If this
         // does not resolve, fall back to new LocalPoint(lx, ly).
         return new LocalPoint(lx, ly, client.getTopLevelWorldView());

@@ -37,6 +37,12 @@ public class MarioPlugin extends Plugin {
 
     private static final long TICK_NANOS = 1_000_000_000L / 30L;
 
+    /**
+     * SM64's level boundary is +/-8192; stay well inside it so the leash trips
+     * before the native spatial partition does.
+     */
+    private static final float SM64_SAFE_RADIUS = 7000f;
+
     @Inject private Client client;
     @Inject private ClientThread clientThread;
     @Inject private MarioConfig config;
@@ -63,6 +69,9 @@ public class MarioPlugin extends Plugin {
     private LibSM64.MarioGeometryBuffers geo;
     private LibSM64.MarioInputs inputs;
     private LibSM64.MarioState state;
+
+    /** Set when the scene is rebuilt: the same tile now means a different place. */
+    private boolean forceRebuild;
 
     private long tickAccumulator;
     private long lastNanos;
@@ -193,12 +202,22 @@ public class MarioPlugin extends Plugin {
 
     @Subscribe
     public void onGameStateChanged(GameStateChanged e) {
-        if (e.getGameState() == GameState.LOGGED_IN) {
+        GameState gs = e.getGameState();
+        if (gs == GameState.LOGGED_IN) {
             tryInit();
             // Scene has changed; force a collision rebuild next frame.
             despawnMario();
-        } else if (e.getGameState() == GameState.LOGIN_SCREEN) {
+            objectRenderer.onSceneChanged();
+            // Tile heights and collision flags all changed underneath us, even
+            // if the scene-tile coordinates look the same.
+            forceRebuild = true;
+        } else if (gs == GameState.LOADING) {
+            // The scene is being rebuilt. Anything anchored to the old world view
+            // is about to become stale.
+            objectRenderer.onSceneChanged();
+        } else if (gs == GameState.LOGIN_SCREEN || gs == GameState.HOPPING) {
             despawnMario();
+            objectRenderer.onSceneChanged();
         }
     }
 
@@ -234,7 +253,8 @@ public class MarioPlugin extends Plugin {
             return;
         }
 
-        rebuildCollisionIfNeeded(false);
+        rebuildCollisionIfNeeded(forceRebuild);
+        forceRebuild = false;
         if (marioId < 0) {
             spawnMario();
             if (marioId < 0) {
@@ -283,8 +303,7 @@ public class MarioPlugin extends Plugin {
             return;
         }
 
-        // The origin is about to move, so capture Mario in world terms and put
-        // him back afterwards. Despawning here would reset him every 8 tiles.
+        // Capture Mario in world terms so he survives the origin change.
         boolean hadMario = marioId >= 0;
         int keepX = 0, keepY = 0, keepH = 0;
         float keepFaceAngle = 0f;
@@ -295,17 +314,32 @@ public class MarioPlugin extends Plugin {
             keepFaceAngle = state.faceAngle;
         }
 
+        // ORDER MATTERS. sm64_static_surfaces_load frees and replaces the entire
+        // surface pool, and Mario's state holds pointers into it -- his current
+        // floor, wall and ceiling. Leaving him alive across the swap leaves those
+        // pointers dangling, and the next tick dereferences freed memory, which
+        // hangs the client thread. Delete first, reload, then recreate.
+        if (hadMario) {
+            sm.sm64_mario_delete(marioId);
+            marioId = -1;
+        }
+
         collision.rebuild(client, client.getPlane(), sx, sy);
         sm.sm64_static_surfaces_load(collision.buffer().pointer(), collision.buffer().count());
         log.info("Uploaded {} surfaces around scene tile ({}, {})",
                 collision.buffer().count(), sx, sy);
 
         if (hadMario) {
-            sm.sm64_set_mario_position(marioId,
-                    collision.toSm64X(keepX),
-                    collision.toSm64Y(keepH),
-                    collision.toSm64Z(keepY));
-            sm.sm64_set_mario_faceangle(marioId, keepFaceAngle);
+            float nx = collision.toSm64X(keepX);
+            float ny = collision.toSm64Y(keepH);
+            float nz = collision.toSm64Z(keepY);
+            marioId = sm.sm64_mario_create(nx, ny + 32f, nz);
+            if (marioId < 0) {
+                log.warn("Could not recreate Mario after surface reload at "
+                        + "({}, {}, {}) -- he will respawn at the player", nx, ny, nz);
+            } else {
+                sm.sm64_set_mario_faceangle(marioId, keepFaceAngle);
+            }
         }
     }
 
@@ -335,6 +369,35 @@ public class MarioPlugin extends Plugin {
         } else {
             log.info("Mario spawned id={} at ({}, {}, {})", marioId, x, y, z);
         }
+    }
+
+    /**
+     * True while Mario is somewhere the simulation can safely represent.
+     *
+     * SM64 drops surfaces outside +/-8192 units of the origin, so anything past
+     * that is already off the collision map. The scene bounds check catches him
+     * leaving the loaded region horizontally, and the depth check catches an
+     * endless fall after he has already left it.
+     */
+    private boolean isMarioSane() {
+        float x = state.position[0];
+        float y = state.position[1];
+        float z = state.position[2];
+
+        if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)) {
+            return false;
+        }
+        if (Math.abs(x) > SM64_SAFE_RADIUS || Math.abs(z) > SM64_SAFE_RADIUS) {
+            return false;
+        }
+        if (y < -SM64_SAFE_RADIUS || y > SM64_SAFE_RADIUS) {
+            return false;
+        }
+
+        int lx = collision.fromSm64XToLocalX(x);
+        int ly = collision.fromSm64ZToLocalY(z);
+        int maxLocal = 104 * SceneCollision.LOCAL_TILE_SIZE;
+        return lx >= 0 && ly >= 0 && lx < maxLocal && ly < maxLocal;
     }
 
     private void despawnMario() {
@@ -383,6 +446,19 @@ public class MarioPlugin extends Plugin {
         }
 
         sm.sm64_mario_tick(marioId, inputs, state, geo);
+
+        // Leash. Once Mario is under player control he can run off the edge of
+        // the loaded collision, at which point he falls forever and his
+        // coordinates grow until they exceed SM64's +/-8192 spatial partition --
+        // which indexes out of range inside native code and takes the JVM with
+        // it. Catch it on our side first.
+        if (!isMarioSane()) {
+            log.warn("Mario escaped the world at ({}, {}, {}) -- respawning",
+                    state.position[0], state.position[1], state.position[2]);
+            despawnMario();
+            rebuildCollisionIfNeeded(true);
+            return;
+        }
 
         objectRenderer.update();
 
