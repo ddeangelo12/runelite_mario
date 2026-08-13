@@ -46,6 +46,16 @@ public interface LibSM64 extends Library {
     short TERRAIN_WATER  = 0x0005;
     short TERRAIN_SLIDE  = 0x0006;
 
+    // --- Action constants from the decomp (act_*.h) ------------------------
+    // Stationary group. The sleep chain is the one that matters here: SM64 puts
+    // Mario to sleep after roughly 20 seconds without input, and waking him back
+    // up hangs inside sm64_mario_tick.
+    int ACT_IDLE            = 0x0C400201;
+    int ACT_START_SLEEPING  = 0x0C400202;
+    int ACT_SLEEPING        = 0x0C000203;
+    int ACT_WAKING_UP       = 0x0C000204;
+    int ACT_PANTING         = 0x0C400205;
+
     /**
      * struct SM64MarioInputs -- 20 bytes (16 float + 3 byte + 1 pad).
      * stickX/stickY are roughly -1..1. camLookX/camLookZ is the camera's
@@ -53,7 +63,7 @@ public interface LibSM64 extends Library {
      * if you leave it at zero Mario's controls will not match the camera.
      */
     @Structure.FieldOrder({ "camLookX", "camLookZ", "stickX", "stickY",
-                            "buttonA", "buttonB", "buttonZ" })
+            "buttonA", "buttonB", "buttonZ" })
     class MarioInputs extends Structure {
         public float camLookX;
         public float camLookZ;
@@ -72,8 +82,8 @@ public interface LibSM64 extends Library {
      *   (pad 46)  flags 48    particleFlags 52    invincTimer 56   size 60
      */
     @Structure.FieldOrder({ "position", "velocity", "faceAngle", "forwardVelocity",
-                            "health", "action", "animID", "animFrame",
-                            "flags", "particleFlags", "invincTimer" })
+            "health", "action", "animID", "animFrame",
+            "flags", "particleFlags", "invincTimer" })
     class MarioState extends Structure {
         public float[] position = new float[3];
         public float[] velocity = new float[3];

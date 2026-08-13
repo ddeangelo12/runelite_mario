@@ -61,9 +61,23 @@ public final class SceneCollision {
     private int originLocalY;
 
     private boolean flipWinding;
+    private boolean flattenTiles = true;
+    private boolean notSlippery = true;
 
     public void setFlipWinding(boolean flip) {
         this.flipWinding = flip;
+    }
+
+    public void setFlattenTiles(boolean flatten) {
+        this.flattenTiles = flatten;
+    }
+
+    public void setNotSlippery(boolean value) {
+        this.notSlippery = value;
+    }
+
+    private short floorType() {
+        return notSlippery ? LibSM64.SURFACE_NOT_SLIPPERY : LibSM64.SURFACE_DEFAULT;
     }
 
     public SurfaceBuffer buffer() {
@@ -146,12 +160,31 @@ public final class SceneCollision {
         }
     }
 
+    /**
+     * Emits the two triangles for one tile.
+     *
+     * WHY FLATTENING MATTERS: OSRS tiles can change height almost vertically,
+     * because nothing physically walks up them -- the client draws the slope and
+     * pathfinding ignores gradient entirely. SM64 decides walkable vs steep from
+     * the surface normal, and a marginal slope makes Mario alternate between
+     * walking and sliding. Each transition re-enters execute_mario_action's
+     * while(inLoop), so a slope right at the threshold hangs the client thread
+     * inside sm64_mario_tick with no way to interrupt it.
+     *
+     * Flattening each tile to its mean height turns ramps into steps. Mario
+     * handles ledges fine, and there is no hole to fall through: each tile still
+     * covers its full footprint, only at a single height.
+     */
     private void emitFloor(int[][][] heights, int plane, int x, int y) {
-        // Corner heights. tileHeights is 105x105 -- one more than the tile grid.
         int h00 = heights[plane][x][y];
         int h10 = heights[plane][x + 1][y];
         int h01 = heights[plane][x][y + 1];
         int h11 = heights[plane][x + 1][y + 1];
+
+        if (flattenTiles) {
+            int avg = (h00 + h10 + h01 + h11) / 4;
+            h00 = h10 = h01 = h11 = avg;
+        }
 
         int lx0 = x * LOCAL_TILE_SIZE;
         int lx1 = (x + 1) * LOCAL_TILE_SIZE;
@@ -163,12 +196,13 @@ public final class SceneCollision {
         int cx = (int) toSm64X(lx0), cz = (int) toSm64Z(ly1), cy = (int) toSm64Y(h01);
         int dx = (int) toSm64X(lx1), dz = (int) toSm64Z(ly1), dy = (int) toSm64Y(h11);
 
+        short type = floorType();
         if (!flipWinding) {
-            tri(ax, ay, az, cx, cy, cz, dx, dy, dz);
-            tri(ax, ay, az, dx, dy, dz, bx, by, bz);
+            tri(type, ax, ay, az, cx, cy, cz, dx, dy, dz);
+            tri(type, ax, ay, az, dx, dy, dz, bx, by, bz);
         } else {
-            tri(ax, ay, az, dx, dy, dz, cx, cy, cz);
-            tri(ax, ay, az, bx, by, bz, dx, dy, dz);
+            tri(type, ax, ay, az, dx, dy, dz, cx, cy, cz);
+            tri(type, ax, ay, az, bx, by, bz, dx, dy, dz);
         }
     }
 
@@ -207,20 +241,30 @@ public final class SceneCollision {
         int yt1 = yb1 + WALL_HEIGHT;
         int yt2 = yb2 + WALL_HEIGHT;
 
+        short type = LibSM64.SURFACE_DEFAULT;
         if (!flipWinding) {
-            tri(x1, yb1, z1, x2, yb2, z2, x2, yt2, z2);
-            tri(x1, yb1, z1, x2, yt2, z2, x1, yt1, z1);
+            tri(type, x1, yb1, z1, x2, yb2, z2, x2, yt2, z2);
+            tri(type, x1, yb1, z1, x2, yt2, z2, x1, yt1, z1);
         } else {
-            tri(x1, yb1, z1, x2, yt2, z2, x2, yb2, z2);
-            tri(x1, yb1, z1, x1, yt1, z1, x2, yt2, z2);
+            tri(type, x1, yb1, z1, x2, yt2, z2, x2, yb2, z2);
+            tri(type, x1, yb1, z1, x1, yt1, z1, x2, yt2, z2);
         }
     }
 
-    private void tri(int x1, int y1, int z1, int x2, int y2, int z2, int x3, int y3, int z3) {
+    private void tri(short type,
+                     int x1, int y1, int z1, int x2, int y2, int z2, int x3, int y3, int z3) {
         if (buffer.count() >= buffer.capacity()) {
             return; // silently drop rather than throw mid-frame
         }
-        buffer.addTriangle(x1, y1, z1, x2, y2, z2, x3, y3, z3);
+        // Skip degenerate triangles. A zero-area surface has an undefined normal,
+        // which SM64 cannot classify as floor, wall or ceiling.
+        if ((x1 == x2 && y1 == y2 && z1 == z2)
+                || (x1 == x3 && y1 == y3 && z1 == z3)
+                || (x2 == x3 && y2 == y3 && z2 == z3)) {
+            return;
+        }
+        buffer.addTriangle(type, (short) 0, LibSM64.TERRAIN_GRASS,
+                x1, y1, z1, x2, y2, z2, x3, y3, z3);
     }
 
     /** Convenience: current scene tile of a local point. */

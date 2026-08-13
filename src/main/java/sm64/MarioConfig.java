@@ -129,6 +129,67 @@ public interface MarioConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "flattenTiles",
+            name = "Flatten tiles",
+            description = "Collapse each tile to a single height, turning OSRS slopes "
+                    + "into steps. Slopes near SM64's walkable threshold make Mario "
+                    + "oscillate between walking and sliding, which hangs the client "
+                    + "inside native code. Leave on unless you are debugging that.",
+            position = 13
+    )
+    default boolean flattenTiles() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "notSlippery",
+            name = "Non-slippery floors",
+            description = "Marks generated floors as SURFACE_NOT_SLIPPERY so Mario "
+                    + "cannot enter a slide on them.",
+            position = 14
+    )
+    default boolean notSlippery() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "preventSleep",
+            name = "Prevent sleeping",
+            description = "SM64 puts Mario to sleep after ~20s idle, and waking him "
+                    + "hangs the client inside native code. This forces him back to "
+                    + "idle before he can drop off.",
+            position = 15
+    )
+    default boolean preventSleep() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "traceTicks",
+            name = "Trace every tick",
+            description = "Log Mario's action and stick input before every native tick. "
+                    + "Very noisy, but the last line written before a hang names the "
+                    + "state the physics got stuck in.",
+            position = 15
+    )
+    default boolean traceTicks() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "stickScale",
+            name = "Stick scale",
+            description = "Multiplier applied to WASD stick input before it reaches "
+                    + "libsm64. If the expected range is not -1..1, a value just "
+                    + "above the walk threshold makes Mario alternate between idle "
+                    + "and walking every tick.",
+            position = 16
+    )
+    default double stickScale() {
+        return 1.0;
+    }
+
+    @ConfigItem(
             keyName = "invertCameraLook",
             name = "Invert camera-relative movement",
             description = "If W sends Mario toward the camera instead of away from it, "

@@ -52,9 +52,21 @@ public class MarioPlugin extends Plugin {
     @Inject private MarioInput input;
     @Inject private MarioObjectRenderer objectRenderer;
 
-    // Strong reference required -- a GC'd JNA callback crashes the JVM.
+    // Strong references required -- a GC'd JNA callback crashes the JVM.
     private final LibSM64.DebugPrintFunction debugPrint =
-            msg -> log.debug("[sm64] {}", msg);
+            msg -> log.info("[sm64] {}", msg);
+
+    /**
+     * No-op sink for SM64's sound events.
+     *
+     * This is not optional. libsm64 calls the registered play-sound function
+     * whenever Mario makes a noise, and the first noise he makes is a footstep
+     * when he starts walking -- which is why standing idle was always safe and
+     * the first WASD press was not. With nothing registered, that is a call
+     * through a null function pointer inside native code.
+     */
+    private final LibSM64.PlaySoundFunction playSound =
+            (soundBits, pos) -> { };
 
     private final SceneCollision collision = new SceneCollision();
 
@@ -87,6 +99,8 @@ public class MarioPlugin extends Plugin {
         log.info("Mario plugin starting");
         lastNanos = System.nanoTime();
         collision.setFlipWinding(config.flipWinding());
+        collision.setFlattenTiles(config.flattenTiles());
+        collision.setNotSlippery(config.notSlippery());
         overlayManager.add(renderer);
         keyManager.registerKeyListener(input);
         clientThread.invokeLater(this::tryInit);
@@ -166,6 +180,7 @@ public class MarioPlugin extends Plugin {
             byte[] rom = Files.readAllBytes(Path.of(romPath));
             sm = LibSM64.INSTANCE;
             sm.sm64_register_debug_print_function(debugPrint);
+            sm.sm64_register_play_sound_function(playSound);
 
             marioTexture = new byte[LibSM64.TEXTURE_BYTES];
             sm.sm64_global_init(rom, marioTexture);
@@ -226,8 +241,12 @@ public class MarioPlugin extends Plugin {
         if (!"mario".equals(e.getGroup())) {
             return;
         }
-        if ("flipWinding".equals(e.getKey())) {
+        if ("flipWinding".equals(e.getKey())
+                || "flattenTiles".equals(e.getKey())
+                || "notSlippery".equals(e.getKey())) {
             collision.setFlipWinding(config.flipWinding());
+            collision.setFlattenTiles(config.flattenTiles());
+            collision.setNotSlippery(config.notSlippery());
             clientThread.invoke(() -> {
                 despawnMario();
                 rebuildCollisionIfNeeded(true);
@@ -383,6 +402,12 @@ public class MarioPlugin extends Plugin {
      * leaving the loaded region horizontally, and the depth check catches an
      * endless fall after he has already left it.
      */
+    private static boolean isSleepAction(int action) {
+        return action == LibSM64.ACT_START_SLEEPING
+                || action == LibSM64.ACT_SLEEPING
+                || action == LibSM64.ACT_WAKING_UP;
+    }
+
     private boolean isMarioSane() {
         float x = state.position[0];
         float y = state.position[1];
@@ -428,6 +453,14 @@ public class MarioPlugin extends Plugin {
             }
         }
 
+        // SM64 walks Mario into the sleep chain after ~20 seconds of no input,
+        // and the wake-up transition hangs inside sm64_mario_tick -- the client
+        // thread spins in native code with no way to interrupt it. Catch the
+        // chain early and put him back to idle before he gets there.
+        if (config.preventSleep() && isSleepAction(state.action)) {
+            sm.sm64_set_mario_action(marioId, LibSM64.ACT_IDLE);
+        }
+
         updateCameraLook();
 
         if (config.controls()) {
@@ -439,8 +472,12 @@ public class MarioPlugin extends Plugin {
                 sx /= mag;
                 sy /= mag;
             }
-            inputs.stickX = sx;
-            inputs.stickY = sy;
+            float stickScale = (float) config.stickScale();
+            // SM64's stick X runs opposite to the intuitive key mapping, so D
+            // (right) is a negative stick value. MarioInput reports plain key
+            // state; the convention is applied here, at the conversion point.
+            inputs.stickX = -sx * stickScale;
+            inputs.stickY = sy * stickScale;
             inputs.buttonA = (byte) (input.jump() ? 1 : 0);
             inputs.buttonB = (byte) (input.dive() ? 1 : 0);
             inputs.buttonZ = (byte) (input.crouch() ? 1 : 0);
@@ -450,6 +487,18 @@ public class MarioPlugin extends Plugin {
             inputs.buttonA = 0;
             inputs.buttonB = 0;
             inputs.buttonZ = 0;
+        }
+
+        if (config.traceTicks()) {
+            // Logged BEFORE the native call on purpose: if the tick never
+            // returns, this line is the last thing written, and it describes
+            // exactly the state and input that triggered it.
+            log.info("tick action=0x{} animID={} frame={} stick=({}, {}) "
+                            + "A={} B={} Z={} pos=({}, {}, {})",
+                    Integer.toHexString(state.action), state.animID, state.animFrame,
+                    inputs.stickX, inputs.stickY,
+                    inputs.buttonA, inputs.buttonB, inputs.buttonZ,
+                    state.position[0], state.position[1], state.position[2]);
         }
 
         sm.sm64_mario_tick(marioId, inputs, state, geo);
@@ -489,7 +538,13 @@ public class MarioPlugin extends Plugin {
         double angle = yaw * (2.0 * Math.PI / 16384.0);
 
         // Camera forward in OSRS local space (x east, y north).
-        float fx = (float) Math.sin(angle);
+        //
+        // The X sign is NOT sin(yaw). Working back from the projection: camera
+        // depth is (y * yawCos - x * yawSin), which is maximised along
+        // (-sin, cos). Using +sin mirrors the mapping about the north-south
+        // axis, so W is correct facing north or south and progressively wrong
+        // everywhere else.
+        float fx = (float) -Math.sin(angle);
         float fy = (float) Math.cos(angle);
 
         // Into SM64 space: X unchanged, Z is negated north (see SceneCollision).
