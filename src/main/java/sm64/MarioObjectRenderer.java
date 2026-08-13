@@ -88,38 +88,40 @@ public class MarioObjectRenderer {
 
     /** Called from the client thread each simulation tick. */
     public void update() {
-        if (!config.objectRenderer() || !plugin.isSimulating()) {
-            if (object != null) {
-                object.setActive(false);
-            }
-            return;
-        }
-        if (unavailable) {
+        // EVERY early return must hide the object. Returning while it is still
+        // active leaves a stale RuneLiteObject registered in the scene at its
+        // last position -- a frozen Mario that no config toggle can clear,
+        // because the next update() takes the same early return again.
+        if (!config.objectRenderer() || !plugin.isSimulating() || unavailable) {
+            hide();
             return;
         }
 
         int triCount = plugin.getTriangleCount();
         if (triCount <= 0 || triCount > MAX_TRIS) {
+            hide();
             return;
         }
 
         if (scratch == null && !buildScratchModel(triCount)) {
+            hide();
             return;
         }
         if (triCount > scratchFaces || triCount * 3 > scratchVertices) {
             log.warn("Scratch model too small: {} faces / {} verts, need {} / {}",
                     scratchFaces, scratchVertices, triCount, triCount * 3);
             unavailable = true;
+            hide();
+            return;
+        }
+
+        LocalPoint anchor = marioAnchor();
+        if (anchor == null || !anchor.isInScene()) {
+            hide();
             return;
         }
 
         plugin.readGeometry(positions, normals, colors, triCount);
-
-        LocalPoint anchor = marioAnchor();
-        if (anchor == null || !anchor.isInScene()) {
-            return;
-        }
-
         writeMesh(triCount, anchor);
 
         if (object == null) {
@@ -128,6 +130,24 @@ public class MarioObjectRenderer {
         }
         object.setLocation(anchor, client.getPlane());
         object.setActive(true);
+    }
+
+    /** Deactivates without discarding, so the next good frame can reuse it. */
+    private void hide() {
+        if (object != null) {
+            object.setActive(false);
+        }
+    }
+
+    /**
+     * Clears the sticky failure state so a config toggle can retry. Without this,
+     * one bad frame disables the renderer for the rest of the session.
+     */
+    public void reset() {
+        hide();
+        object = null;
+        scratch = null;
+        unavailable = false;
     }
 
     /**

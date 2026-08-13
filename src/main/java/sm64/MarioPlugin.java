@@ -234,6 +234,10 @@ public class MarioPlugin extends Plugin {
             });
         } else if ("romPath".equals(e.getKey())) {
             clientThread.invoke(this::tryInit);
+        } else if ("objectRenderer".equals(e.getKey())
+                || "scratchModelId".equals(e.getKey())) {
+            // Let a toggle clear any sticky failure state.
+            clientThread.invoke(objectRenderer::reset);
         }
     }
 
@@ -413,6 +417,9 @@ public class MarioPlugin extends Plugin {
         if (config.snapToPlayer()) {
             Player p = client.getLocalPlayer();
             LocalPoint plp = p != null ? p.getLocalLocation() : null;
+            // isInScene matters here: during a scene transition the player's
+            // local point goes briefly stale, and teleporting Mario to a bogus
+            // coordinate strands him outside the loaded collision.
             if (plp != null && plp.isInScene()) {
                 sm.sm64_set_mario_position(marioId,
                         collision.toSm64X(plp.getX()),
