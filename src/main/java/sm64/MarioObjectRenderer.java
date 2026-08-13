@@ -1,0 +1,339 @@
+package sm64;
+
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
+import net.runelite.api.Model;
+import net.runelite.api.ModelData;
+import net.runelite.api.Perspective;
+import net.runelite.api.RuneLiteObject;
+import net.runelite.api.coords.LocalPoint;
+
+import javax.inject.Inject;
+import javax.inject.Singleton;
+
+/**
+ * Renders Mario as a RuneLiteObject so the client draws him inside the scene,
+ * with real depth testing. Unlike the Java2D overlay, walls occlude him.
+ *
+ * THE PROBLEM THIS SOLVES AWKWARDLY
+ * --------------------------------
+ * There is no API to build a Model from raw vertex arrays. But Mesh exposes the
+ * live backing arrays -- getVerticesX() returns the actual float[], not a copy --
+ * so we borrow a cache model big enough to hold Mario and overwrite its contents
+ * each frame.
+ *
+ * Consequences you cannot avoid on this path:
+ *  - Face colours are Jagex HSL shorts, not per-vertex RGB. Mario is flat-shaded
+ *    per triangle, and the palette quantises his colours.
+ *  - No UVs, so no ROM textures. His cap logo, face and buttons are gone.
+ *  - The scratch model must be at least as large as Mario's mesh. Unused faces
+ *    are collapsed to degenerate triangles rather than removed.
+ *
+ * For textured Mario you need the GPU plugin route. This is the "correct
+ * occlusion, worse looks" option.
+ */
+@Slf4j
+@Singleton
+public class MarioObjectRenderer {
+
+    private static final int MAX_TRIS = LibSM64.SM64_GEO_MAX_TRIANGLES;
+
+    /** Upper bound on merged copies. Beyond this the model id is simply wrong. */
+    private static final int MAX_MERGE_COPIES = 512;
+
+    private final Client client;
+    private final MarioPlugin plugin;
+    private final MarioConfig config;
+
+    private final float[] positions = new float[MAX_TRIS * 9];
+    private final float[] colors = new float[MAX_TRIS * 9];
+    private final float[] normals = new float[MAX_TRIS * 9];
+
+    private RuneLiteObject object;
+    private Model scratch;
+    private int scratchFaces;
+    private int scratchVertices;
+    private boolean unavailable;
+
+    @Inject
+    MarioObjectRenderer(Client client, MarioPlugin plugin, MarioConfig config) {
+        this.client = client;
+        this.plugin = plugin;
+        this.config = config;
+    }
+
+    public void shutDown() {
+        if (object != null) {
+            object.setActive(false);
+            object = null;
+        }
+        scratch = null;
+        unavailable = false;
+    }
+
+    /** Called from the client thread each simulation tick. */
+    public void update() {
+        if (!config.objectRenderer() || !plugin.isSimulating()) {
+            if (object != null) {
+                object.setActive(false);
+            }
+            return;
+        }
+        if (unavailable) {
+            return;
+        }
+
+        int triCount = plugin.getTriangleCount();
+        if (triCount <= 0 || triCount > MAX_TRIS) {
+            return;
+        }
+
+        if (scratch == null && !buildScratchModel(triCount)) {
+            return;
+        }
+        if (triCount > scratchFaces || triCount * 3 > scratchVertices) {
+            log.warn("Scratch model too small: {} faces / {} verts, need {} / {}",
+                    scratchFaces, scratchVertices, triCount, triCount * 3);
+            unavailable = true;
+            return;
+        }
+
+        plugin.readGeometry(positions, normals, colors, triCount);
+
+        LocalPoint anchor = marioAnchor();
+        if (anchor == null || !anchor.isInScene()) {
+            return;
+        }
+
+        writeMesh(triCount, anchor);
+
+        if (object == null) {
+            object = client.createRuneLiteObject();
+            object.setModel(scratch);
+        }
+        object.setLocation(anchor, client.getPlane());
+        object.setActive(true);
+    }
+
+    /**
+     * Mario's position snapped to a tile. Model vertices are expressed relative
+     * to this anchor, so it needs to move with him or the vertex offsets grow
+     * large enough to lose precision.
+     */
+    private LocalPoint marioAnchor() {
+        SceneCollision collision = plugin.getCollision();
+        float[] state = plugin.getMarioPosition();
+        if (state == null) {
+            return null;
+        }
+        int lx = collision.fromSm64XToLocalX(state[0]);
+        int ly = collision.fromSm64ZToLocalY(state[2]);
+        // LocalPoint gained a WorldView parameter in recent versions. If this
+        // does not resolve, fall back to new LocalPoint(lx, ly).
+        return new LocalPoint(lx, ly, client.getTopLevelWorldView());
+    }
+
+    /**
+     * Merges copies of a small cache model until the result has room for Mario.
+     * The geometry does not matter -- only the array sizes -- because every
+     * vertex and face gets overwritten before it is ever drawn.
+     */
+    private boolean buildScratchModel(int triCount) {
+        try {
+            int baseId = config.scratchModelId();
+            ModelData base = client.loadModelData(baseId);
+            if (base == null) {
+                log.error("Could not load scratch model id {}", baseId);
+                unavailable = true;
+                return false;
+            }
+
+            int baseFaces = base.getFaceCount();
+            int baseVerts = base.getVerticesCount();
+            log.info("Scratch base id {}: {} faces, {} vertices",
+                    baseId, baseFaces, baseVerts);
+
+            if (baseFaces <= 0 || baseVerts <= 0) {
+                log.error("Scratch model id {} is empty -- pick a different id", baseId);
+                unavailable = true;
+                return false;
+            }
+
+            // Vertices are usually the binding constraint, not faces: Mario needs
+            // 3 unshared vertices per triangle. Compute the copy count directly
+            // rather than growing one at a time.
+            int needFaces = triCount;
+            int needVerts = triCount * 3;
+            int copies = Math.max(ceilDiv(needFaces, baseFaces),
+                    ceilDiv(needVerts, baseVerts));
+
+            if (copies > MAX_MERGE_COPIES) {
+                log.error("Scratch model {} would need {} copies to reach {} faces / "
+                                + "{} vertices. Pick a larger model id.",
+                        baseId, copies, needFaces, needVerts);
+                unavailable = true;
+                return false;
+            }
+
+            ModelData merged;
+            if (copies <= 1) {
+                merged = base;
+            } else {
+                ModelData[] parts = new ModelData[copies];
+                for (int i = 0; i < copies; i++) {
+                    parts[i] = client.loadModelData(baseId);
+                    // Displace each copy. Identical copies occupy identical
+                    // coordinates, and mergeModels collapses coincident vertices --
+                    // which is why face count multiplies but vertex count does not.
+                    // cloneVertices first: loadModelData hands back shared arrays.
+                    parts[i].cloneVertices();
+                    parts[i].translate(i * 8, 0, 0);
+                }
+                merged = client.mergeModels(parts);
+            }
+
+            merged.cloneVertices();
+            merged.cloneColors();
+
+            scratch = merged.light();
+            scratchFaces = scratch.getFaceCount();
+            scratchVertices = scratch.getVerticesCount();
+            log.info("Scratch model: {} copies -> {} faces, {} vertices "
+                            + "(need {} / {})",
+                    copies, scratchFaces, scratchVertices, needFaces, needVerts);
+
+            if (scratchFaces < needFaces || scratchVertices < needVerts) {
+                log.error("Merge did not produce enough geometry -- mergeModels may "
+                        + "be deduplicating vertices. Try a larger scratch model id.");
+                unavailable = true;
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to build scratch model", e);
+            unavailable = true;
+            return false;
+        }
+    }
+
+    private static int ceilDiv(int a, int b) {
+        return (a + b - 1) / b;
+    }
+
+    private void writeMesh(int triCount, LocalPoint anchor) {
+        float[] vx = scratch.getVerticesX();
+        float[] vy = scratch.getVerticesY();
+        float[] vz = scratch.getVerticesZ();
+        int[] f1 = scratch.getFaceIndices1();
+        int[] f2 = scratch.getFaceIndices2();
+        int[] f3 = scratch.getFaceIndices3();
+
+        SceneCollision collision = plugin.getCollision();
+        float scale = (float) config.marioScale();
+        int originX = collision.originLocalX();
+        int originY = collision.originLocalY();
+
+        int anchorX = anchor.getX();
+        int anchorY = anchor.getY();
+        int anchorH = Perspective.getTileHeight(client, anchor, client.getPlane());
+
+        for (int t = 0; t < triCount; t++) {
+            for (int v = 0; v < 3; v++) {
+                int pi = t * 9 + v * 3;
+                int vi = t * 3 + v;
+
+                float sx = positions[pi];
+                float sy = positions[pi + 1];
+                float sz = positions[pi + 2];
+
+                // SM64 -> OSRS local, then relative to the anchor tile.
+                // Model space: X east, Y height (negative is up), Z north.
+                vx[vi] = (originX + sx * scale) - anchorX;
+                vy[vi] = (-sy * scale) - anchorH;
+                vz[vi] = (originY - sz * scale) - anchorY;
+            }
+            f1[t] = t * 3;
+            f2[t] = t * 3 + 1;
+            f3[t] = t * 3 + 2;
+        }
+
+        // Collapse unused faces so leftover cache geometry does not render.
+        for (int t = triCount; t < scratchFaces; t++) {
+            f1[t] = 0;
+            f2[t] = 0;
+            f3[t] = 0;
+        }
+
+        writeColors(triCount);
+    }
+
+    /**
+     * Converts libsm64's per-vertex RGB into Jagex HSL face colours.
+     *
+     * The packing is hue(6 bits) << 10 | saturation(3 bits) << 7 | luminance(7).
+     * Lossy: 6 bits of hue over 3 of saturation, so Mario's reds and blues
+     * flatten noticeably compared to the overlay renderer.
+     *
+     * Model exposes gouraud colours as three arrays, one per triangle corner.
+     * Writing the same value to all three gives flat shading per face, which is
+     * what we want here -- we are doing our own lambert term below, because the
+     * client will not light a mesh whose normals it did not compute.
+     */
+    private void writeColors(int triCount) {
+        int[] c1 = scratch.getFaceColors1();
+        int[] c2 = scratch.getFaceColors2();
+        int[] c3 = scratch.getFaceColors3();
+        if (c1 == null || c2 == null || c3 == null) {
+            return;
+        }
+        int limit = Math.min(triCount, Math.min(c1.length, Math.min(c2.length, c3.length)));
+
+        for (int t = 0; t < limit; t++) {
+            int ci = t * 9;
+            float r = (colors[ci]     + colors[ci + 3] + colors[ci + 6]) / 3f;
+            float g = (colors[ci + 1] + colors[ci + 4] + colors[ci + 7]) / 3f;
+            float b = (colors[ci + 2] + colors[ci + 5] + colors[ci + 8]) / 3f;
+
+            int ni = t * 9;
+            float lambert = normals[ni] * 0.35f + normals[ni + 1] * 0.8f
+                    + normals[ni + 2] * 0.5f;
+            float shade = 0.6f + 0.4f * Math.max(0f, lambert);
+
+            int hsl = rgbToJagexHsl(r * shade, g * shade, b * shade) & 0xFFFF;
+            c1[t] = hsl;
+            c2[t] = hsl;
+            c3[t] = hsl;
+        }
+    }
+
+    static short rgbToJagexHsl(float rf, float gf, float bf) {
+        float r = clamp(rf), g = clamp(gf), b = clamp(bf);
+
+        float max = Math.max(r, Math.max(g, b));
+        float min = Math.min(r, Math.min(g, b));
+        float l = (max + min) / 2f;
+
+        float h = 0f, s = 0f;
+        float d = max - min;
+        if (d > 0.0001f) {
+            s = l > 0.5f ? d / (2f - max - min) : d / (max + min);
+            if (max == r) {
+                h = (g - b) / d + (g < b ? 6f : 0f);
+            } else if (max == g) {
+                h = (b - r) / d + 2f;
+            } else {
+                h = (r - g) / d + 4f;
+            }
+            h /= 6f;
+        }
+
+        int hue = (int) (h * 63f) & 0x3F;
+        int sat = (int) (s * 7f) & 0x07;
+        int lum = (int) (l * 127f) & 0x7F;
+        return (short) ((hue << 10) | (sat << 7) | lum);
+    }
+
+    private static float clamp(float v) {
+        return v < 0f ? 0f : (v > 1f ? 1f : v);
+    }
+}

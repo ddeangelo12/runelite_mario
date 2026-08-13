@@ -94,6 +94,41 @@ public interface MarioConfig extends Config {
     }
 
     @ConfigItem(
+            keyName = "objectRenderer",
+            name = "Use RuneLiteObject renderer",
+            description = "Draw Mario inside the 3D scene so walls occlude him. "
+                    + "Loses ROM textures and flattens his colours to the Jagex "
+                    + "HSL palette. Turn off the overlay renderer to compare.",
+            position = 10
+    )
+    default boolean objectRenderer() {
+        return false;
+    }
+
+    @ConfigItem(
+            keyName = "overlayRenderer",
+            name = "Use overlay renderer",
+            description = "The Java2D software renderer. Textureless and draws on top "
+                    + "of everything, but always works.",
+            position = 11
+    )
+    default boolean overlayRenderer() {
+        return true;
+    }
+
+    @ConfigItem(
+            keyName = "scratchModelId",
+            name = "Scratch model id",
+            description = "Cache model borrowed as a container for Mario's geometry. "
+                    + "Any id works as long as copies of it can be merged to reach "
+                    + "~750 faces.",
+            position = 12
+    )
+    default int scratchModelId() {
+        return 29260;
+    }
+
+    @ConfigItem(
             keyName = "invertCameraLook",
             name = "Invert camera-relative movement",
             description = "If W sends Mario toward the camera instead of away from it, "

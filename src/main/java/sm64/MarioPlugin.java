@@ -44,6 +44,7 @@ public class MarioPlugin extends Plugin {
     @Inject private MarioRenderer renderer;
     @Inject private KeyManager keyManager;
     @Inject private MarioInput input;
+    @Inject private MarioObjectRenderer objectRenderer;
 
     // Strong reference required -- a GC'd JNA callback crashes the JVM.
     private final LibSM64.DebugPrintFunction debugPrint =
@@ -86,6 +87,7 @@ public class MarioPlugin extends Plugin {
     protected void shutDown() {
         overlayManager.remove(renderer);
         keyManager.unregisterKeyListener(input);
+        clientThread.invoke(objectRenderer::shutDown);
         input.clear();
         clientThread.invoke(() -> {
             if (marioId >= 0 && sm != null) {
@@ -113,6 +115,11 @@ public class MarioPlugin extends Plugin {
      */
     public int getTriangleCount() {
         return geo == null ? 0 : (geo.numTrianglesUsed & 0xFFFF);
+    }
+
+    /** Mario's SM64-space position, or null if he does not exist yet. */
+    public float[] getMarioPosition() {
+        return (state == null || marioId < 0) ? null : state.position;
     }
 
     public SceneCollision getCollision() {
@@ -376,6 +383,8 @@ public class MarioPlugin extends Plugin {
         }
 
         sm.sm64_mario_tick(marioId, inputs, state, geo);
+
+        objectRenderer.update();
 
         if (config.logState() && ++logCounter % 30 == 0) {
             logFloorProbe();

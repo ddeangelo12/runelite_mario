@@ -75,7 +75,7 @@ public class MarioRenderer extends Overlay {
 
     @Override
     public Dimension render(Graphics2D g) {
-        if (!plugin.isSimulating()) {
+        if (!plugin.isSimulating() || !config.overlayRenderer()) {
             return null;
         }
 
