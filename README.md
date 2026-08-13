@@ -1,2 +1,1 @@
-# Example
-An example greeter plugin
+Integrates Mario into a runelite plugin
