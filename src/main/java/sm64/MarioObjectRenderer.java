@@ -103,7 +103,7 @@ public class MarioObjectRenderer {
             return;
         }
 
-        if (scratch == null && !buildScratchModel(triCount)) {
+        if (scratch == null && !buildScratchModel()) {
             hide();
             return;
         }
@@ -180,7 +180,15 @@ public class MarioObjectRenderer {
      * The geometry does not matter -- only the array sizes -- because every
      * vertex and face gets overwritten before it is ever drawn.
      */
-    private boolean buildScratchModel(int triCount) {
+    /**
+     * Sized for SM64_GEO_MAX_TRIANGLES, never for the current frame's count.
+     *
+     * Mario's triangle count is NOT constant. It sits at 752 for common states
+     * but changes with hand pose, cap state and draw layer -- a slide pushes it
+     * to 763. Sizing to whatever happened to be live when this first ran means
+     * the model is one animation away from being too small.
+     */
+    private boolean buildScratchModel() {
         try {
             int baseId = config.scratchModelId();
             ModelData base = client.loadModelData(baseId);
@@ -204,34 +212,51 @@ public class MarioObjectRenderer {
             // Vertices are usually the binding constraint, not faces: Mario needs
             // 3 unshared vertices per triangle. Compute the copy count directly
             // rather than growing one at a time.
-            int needFaces = triCount;
-            int needVerts = triCount * 3;
+            int needFaces = MAX_TRIS;
+            int needVerts = MAX_TRIS * 3;
             int copies = Math.max(ceilDiv(needFaces, baseFaces),
                     ceilDiv(needVerts, baseVerts));
 
-            if (copies > MAX_MERGE_COPIES) {
-                log.error("Scratch model {} would need {} copies to reach {} faces / "
-                                + "{} vertices. Pick a larger model id.",
-                        baseId, copies, needFaces, needVerts);
-                unavailable = true;
-                return false;
+            // Retry with more copies rather than trusting the arithmetic.
+            // mergeModels collapses coincident vertices, so the yield per copy
+            // is not guaranteed even with the copies spaced apart -- the first
+            // attempt here came up 130 vertices short of 27 x 118.
+            ModelData merged = null;
+            for (int attempt = 0; attempt < 6; attempt++) {
+                if (copies > MAX_MERGE_COPIES) {
+                    log.error("Scratch model {} would need more than {} copies to "
+                                    + "reach {} faces / {} vertices. Pick a larger id.",
+                            baseId, MAX_MERGE_COPIES, needFaces, needVerts);
+                    unavailable = true;
+                    return false;
+                }
+
+                merged = mergeCopies(baseId, copies);
+                if (merged == null) {
+                    unavailable = true;
+                    return false;
+                }
+                if (merged.getFaceCount() >= needFaces
+                        && merged.getVerticesCount() >= needVerts) {
+                    break;
+                }
+
+                log.info("Merge of {} copies gave {} faces / {} vertices, short of "
+                                + "{} / {} -- retrying with more",
+                        copies, merged.getFaceCount(), merged.getVerticesCount(),
+                        needFaces, needVerts);
+                // Scale up by the observed shortfall plus headroom.
+                int have = Math.max(1, merged.getVerticesCount());
+                copies = Math.max(copies + 2,
+                        (int) Math.ceil(copies * (needVerts / (double) have)) + 2);
+                merged = null;
             }
 
-            ModelData merged;
-            if (copies <= 1) {
-                merged = base;
-            } else {
-                ModelData[] parts = new ModelData[copies];
-                for (int i = 0; i < copies; i++) {
-                    parts[i] = client.loadModelData(baseId);
-                    // Displace each copy. Identical copies occupy identical
-                    // coordinates, and mergeModels collapses coincident vertices --
-                    // which is why face count multiplies but vertex count does not.
-                    // cloneVertices first: loadModelData hands back shared arrays.
-                    parts[i].cloneVertices();
-                    parts[i].translate(i * 8, 0, 0);
-                }
-                merged = client.mergeModels(parts);
+            if (merged == null) {
+                log.error("Could not build a large enough scratch model from id {}",
+                        baseId);
+                unavailable = true;
+                return false;
             }
 
             merged.cloneVertices();
@@ -245,8 +270,8 @@ public class MarioObjectRenderer {
                     copies, scratchFaces, scratchVertices, needFaces, needVerts);
 
             if (scratchFaces < needFaces || scratchVertices < needVerts) {
-                log.error("Merge did not produce enough geometry -- mergeModels may "
-                        + "be deduplicating vertices. Try a larger scratch model id.");
+                log.error("light() shrank the model below what merge produced: "
+                        + "{} faces / {} vertices", scratchFaces, scratchVertices);
                 unavailable = true;
                 return false;
             }
@@ -256,6 +281,30 @@ public class MarioObjectRenderer {
             unavailable = true;
             return false;
         }
+    }
+
+    /**
+     * Merges n copies of a model, spacing them widely enough that no two
+     * vertices coincide. Coincident vertices get deduplicated by mergeModels,
+     * which is why the naive approach yields fewer vertices than copies x size.
+     * The spacing is in 1/128ths of a tile, so 256 is two tiles per copy --
+     * far wider than any base model. The layout is irrelevant since every
+     * vertex is overwritten before the model is drawn.
+     */
+    private ModelData mergeCopies(int baseId, int n) {
+        ModelData[] parts = new ModelData[n];
+        for (int i = 0; i < n; i++) {
+            ModelData part = client.loadModelData(baseId);
+            if (part == null) {
+                log.error("loadModelData({}) returned null on copy {}", baseId, i);
+                return null;
+            }
+            // cloneVertices first: loadModelData hands back shared arrays.
+            part.cloneVertices();
+            part.translate(i * 256, 0, 0);
+            parts[i] = part;
+        }
+        return client.mergeModels(parts);
     }
 
     private static int ceilDiv(int a, int b) {
